@@ -1,12 +1,12 @@
 package main
 
 import (
-	"net"
+	"encoding/json"
+	"fmt"
 	"log"
+	"net"
 	"sync"
 	"time"
-	"fmt"
-	"encoding/json"
 )
 
 var entry_timeout = 90 * time.Second
@@ -17,10 +17,10 @@ type Request struct {
 
 type Response struct {
 	SourcePort int
-	SourceIP string
-	DestPort int
-	DestIP string
-	Error string
+	SourceIP   string
+	DestPort   int
+	DestIP     string
+	Error      string
 }
 
 type IPTuple struct {
@@ -39,7 +39,7 @@ type IPTupleMessage struct { //sent over channel to TCP waiter, can represent fa
  * if the TCP connection gets there first, it populates the waiting_channel and waits for it.
  */
 type IPEntry struct {
-	address IPTuple
+	address  IPTuple
 	ip_valid bool //IPTuple can be uninitialized if the struct is created by a TCP waiter
 
 	waiting_channels []chan IPTupleMessage //channels to waiting TCP threads
@@ -48,10 +48,9 @@ type IPEntry struct {
 }
 
 type ServerState struct {
-	lock sync.Mutex
+	lock   sync.Mutex
 	ip_map map[string]*IPEntry
 }
-
 
 func (state ServerState) AddIPEntry(addr string, port int) {
 	state.lock.Lock()
@@ -72,22 +71,22 @@ func (state ServerState) AddIPEntry(addr string, port int) {
 
 	//if the TCP channel isn't here yet, just populate the IPTuple values for it when it arrives
 	state.ip_map[addr] = &IPEntry{
-		address: IPTuple{addr, port},
+		address:  IPTuple{addr, port},
 		ip_valid: true,
-		created: time.Now(),
+		created:  time.Now(),
 	}
 }
 
 //checks if an entry for the given address exists, and returns the corresponding IPTuple
 //if it doesn't, it sets up a waiter channel and returns it, along with false for "ok"
-func (state ServerState) GetIPEntry(addr string, waiter_channel chan IPTupleMessage)  (IPTuple, bool) {
+func (state ServerState) GetIPEntry(addr string, waiter_channel chan IPTupleMessage) (IPTuple, bool) {
 	state.lock.Lock()
 	defer state.lock.Unlock()
 
-		//check if entry exists and use it if it does
+	//check if entry exists and use it if it does
 	if entry, ok := state.ip_map[addr]; ok {
 		if entry.ip_valid {
-			return entry.address, true	
+			return entry.address, true
 		}
 		fmt.Println("IP invalid! ", entry)
 		entry.waiting_channels = append(entry.waiting_channels, waiter_channel)
@@ -96,7 +95,7 @@ func (state ServerState) GetIPEntry(addr string, waiter_channel chan IPTupleMess
 
 	state.ip_map[addr] = &IPEntry{
 		waiting_channels: []chan IPTupleMessage{waiter_channel},
-		created: time.Now(),
+		created:          time.Now(),
 	}
 	return IPTuple{}, false
 }
@@ -117,18 +116,17 @@ func (state ServerState) Prune() { //remove stale entries
 	}
 }
 
-
 func listenUDP(state *ServerState, port int) {
 	udp_addr := net.UDPAddr{
 		Port: port,
-		IP: nil, //net.ParseIP("0.0.0.0"),
+		IP:   nil, //net.ParseIP("0.0.0.0"),
 	}
 	conn, error := net.ListenUDP("udp", &udp_addr)
 	if error != nil {
 		log.Fatal(error)
 	}
 
-	buf := make([]byte, 1024)	
+	buf := make([]byte, 1024)
 	for {
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
@@ -166,12 +164,12 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 		log.Print(err)
 		return
 	}
-	fmt.Printf("Got valid TCP request for %s from %s\n", 
+	fmt.Printf("Got valid TCP request for %s from %s\n",
 		req.IP, conn.RemoteAddr().String())
 
 	var resp Response
-	resp.SourceIP= conn.RemoteAddr().(*net.TCPAddr).IP.String()
-	resp.SourcePort= conn.RemoteAddr().(*net.TCPAddr).Port
+	resp.SourceIP = conn.RemoteAddr().(*net.TCPAddr).IP.String()
+	resp.SourcePort = conn.RemoteAddr().(*net.TCPAddr).Port
 
 	//add pending request to registry and wait if neccessary
 	ip_channel := make(chan IPTupleMessage)
@@ -196,7 +194,7 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 	message := <-ip_channel
 	if !message.ok { //entry timed out, big sad
 		fmt.Printf("Entry %s timed out! Telling the client the bad news...\n", req.IP)
-		resp.Error= "Timeout"
+		resp.Error = "Timeout"
 
 		pkt, err := json.Marshal(resp)
 		if err != nil {
@@ -223,7 +221,7 @@ func listenTCP(state *ServerState, port int) {
 	sock, error := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if error != nil {
 		log.Fatal(error)
-	}	
+	}
 
 	for {
 		conn, err := sock.Accept()
