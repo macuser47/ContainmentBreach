@@ -36,7 +36,7 @@ type IPTupleMessage struct { //sent over channel to TCP waiter, can represent fa
 /*
  * entries containing active UDP connections
  * if the UDP connection gets there first, it populates the IPTuple.
- * if the TCP connection gets there first, it populates the waiting_channel and waits for it.
+ * if the TCP connection gets there first, it populates waiting_channels and waits for it.
  */
 type IPEntry struct {
 	address  IPTuple
@@ -48,7 +48,7 @@ type IPEntry struct {
 }
 
 type ServerState struct {
-	lock   sync.Mutex
+	lock   sync.RWMutex
 	ip_map map[string]*IPEntry
 }
 
@@ -98,6 +98,15 @@ func (state ServerState) GetIPEntry(addr string, waiter_channel chan IPTupleMess
 		created:          time.Now(),
 	}
 	return IPTuple{}, false
+}
+
+//get entry from ip map, but without failure/channel mechanism
+func (state ServerState) GetEntry(addr string) (*IPEntry, bool) {
+	state.lock.RLock()
+	defer state.lock.RUnlock()
+
+	value, ok := state.ip_map[addr]
+	return value, ok
 }
 
 func (state ServerState) Prune() { //remove stale entries
@@ -168,10 +177,27 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 		req.IP, conn.RemoteAddr().String())
 
 	var resp Response
-	resp.SourceIP = conn.RemoteAddr().(*net.TCPAddr).IP.String()
-	resp.SourcePort = conn.RemoteAddr().(*net.TCPAddr).Port
 
-	//add pending request to registry and wait if neccessary
+	//populate source entries from the UDP entry (if it's not there, that's on the client)
+	sender_addr := conn.RemoteAddr().(*net.TCPAddr).IP.String()
+	fmt.Printf("Looking up '%s'\n", sender_addr)
+	ip_ent, ok := state.GetEntry(sender_addr)
+	if !ok {
+		fmt.Printf("TCP request was for a UDP entry that doesn't exist! Sending error...\n")
+		resp.Error = "No UDP received"
+
+		pkt, err := json.Marshal(resp)
+		if err != nil {
+			log.Print(err)
+			return
+		}
+		conn.Write(pkt)
+		return
+	}
+	resp.SourceIP = ip_ent.address.addr
+	resp.SourcePort = ip_ent.address.port
+
+	//add pending request for destination data to registry and wait if neccessary
 	ip_channel := make(chan IPTupleMessage)
 	if entry, ok := state.GetIPEntry(req.IP, ip_channel); ok { //we don't need to wait, connection already established
 		fmt.Printf("Entry already exists for %s, responding immediately!\n", req.IP)
