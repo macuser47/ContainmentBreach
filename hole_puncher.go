@@ -240,7 +240,7 @@ func main() {
 		ip_map: make(map[string]*IPEntry),
 	}
 	port := 6969
-	fmt.Printf("Starting HolePuncher server on port %d\n", port)
+	fmt.Printf("Starting Containment Breach Hole-Punching server on port %d\n", port)
 
 	go listenUDP(&state, port)
 	go listenTCP(&state, port)
