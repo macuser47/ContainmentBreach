@@ -21,7 +21,8 @@ type Request struct {
 	RemoteIP       string
 	RemotePeerPort int
 
-	LocalPeerPort int //used as identifier for TCP sender to associate with UDP packet
+	LocalPeerPort  int    //used as identifier for TCP sender to associate with UDP packet
+	ConnectionType string //Peer, Client, or Server
 }
 
 type Response struct {
@@ -66,7 +67,50 @@ type ServerState struct {
 	PeerMap map[string]*IPEntry
 }
 
-func (state ServerState) AddIPEntry(addr string, port int, peer_port int) {
+func (state ServerState) RefreshSession(addr string, peer_port int) {
+	state.Lock.Lock()
+	defer state.Lock.Unlock()
+
+	index := fmt.Sprintf("%s:%d", addr, peer_port)
+	if entry, ok := state.PeerMap[index]; ok {
+		entry.Created = time.Now()
+	}
+}
+
+func (state ServerState) AddHostChannel(addr string, peer_port int, channel chan IPTupleMessage) bool {
+	state.Lock.Lock()
+	defer state.Lock.Unlock()
+
+	index := fmt.Sprintf("%s:%d", addr, peer_port)
+	if entry, ok := state.PeerMap[index]; ok {
+		entry.WaitingChannels = []chan IPTupleMessage{channel}
+		return true
+	}
+
+	return false
+}
+
+//gets host entry and wakes host thread to send client information
+func (state ServerState) SendClientUpdate(host_addr string, host_peer_port int, client_addr string, client_port int) (IPTuple, bool) {
+	state.Lock.RLock()
+	defer state.Lock.RUnlock()
+
+	index := fmt.Sprintf("%s:%d", host_addr, host_peer_port)
+	if entry, ok := state.PeerMap[index]; ok {
+		//notify host thread
+		for _, channel := range entry.WaitingChannels {
+			channel <- IPTupleMessage{IPTuple{client_addr, client_port, 0}, true}
+		}
+
+		//no need for IPValid check, it will never be false
+		return entry.Address, true
+	}
+
+	//reutrn failure if the host entry does not exist
+	return IPTuple{}, false
+}
+
+func (state ServerState) AddEntry(addr string, port int, peer_port int) {
 	state.Lock.Lock()
 	defer state.Lock.Unlock()
 
@@ -76,7 +120,7 @@ func (state ServerState) AddIPEntry(addr string, port int, peer_port int) {
 	//check if entry already exists, and notifies waiting TCP thread if it exists
 	if entry, ok := state.PeerMap[index]; ok {
 		for _, channel := range entry.WaitingChannels {
-			channel <- IPTupleMessage{IPTuple{addr, port, peer_port}, true}
+			channel <- IPTupleMessage{IPTuple{addr, port, 0}, true}
 		}
 
 		//make sure the values are populated for future requests, and reset the creation time
@@ -96,7 +140,7 @@ func (state ServerState) AddIPEntry(addr string, port int, peer_port int) {
 
 //checks if an entry for the given address exists, and returns the corresponding IPTuple
 //if it doesn't, it sets up a waiter channel and returns it, along with false for "ok"
-func (state ServerState) GetIPEntry(addr string, peer_port int, waiter_channel chan IPTupleMessage) (IPTuple, bool) {
+func (state ServerState) GetPeerEntry(addr string, peer_port int, waiter_channel chan IPTupleMessage) (IPTuple, bool) {
 	state.Lock.Lock()
 	defer state.Lock.Unlock()
 
@@ -177,14 +221,13 @@ func listenUDP(state *ServerState, port int) {
 			continue
 		}
 
-		//add entry for self
 		fmt.Printf(
-			"Got UDP packet! Adding entry for %s:%d with peer port: %d\n",
+			"Got UDP packet! Creating entry for %s:%d with peer port: %d\n",
 			addr.IP.String(),
 			addr.Port,
 			packet.PeerPort,
 		)
-		state.AddIPEntry(addr.IP.String(), addr.Port, packet.PeerPort)
+		state.AddEntry(addr.IP.String(), addr.Port, packet.PeerPort)
 	}
 }
 
@@ -230,7 +273,72 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 
 	//add pending request for destination data to registry and wait if neccessary
 	ip_channel := make(chan IPTupleMessage)
-	if entry, ok := state.GetIPEntry(req.RemoteIP, req.RemotePeerPort, ip_channel); ok { //we don't need to wait, connection already established
+	var entry IPTuple
+	switch req.ConnectionType {
+	case "Peer":
+		entry, ok = state.GetPeerEntry(req.RemoteIP, req.RemotePeerPort, ip_channel)
+	case "Client":
+		entry, ok = state.SendClientUpdate(req.RemoteIP, req.RemotePeerPort, ip_ent.Address.Addr, ip_ent.Address.Port)
+		if !ok {
+			fmt.Printf("Client %s:%d tried to connect to host that doesn't exist! Sending error...\n",
+				ip_ent.Address.Addr, ip_ent.Address.Port)
+			resp.Error = "No Host"
+
+			pkt, err := json.Marshal(resp)
+			if err != nil {
+				log.Print(err)
+				return
+			}
+			conn.Write(pkt)
+			return
+		}
+	case "Server":
+		if ok := state.AddHostChannel(ip_ent.Address.Addr, req.LocalPeerPort, ip_channel); !ok {
+			fmt.Printf("Host %s:%d tried to listen on events for host that doesn't exist! Sending error...\n",
+				ip_ent.Address.Addr, ip_ent.Address.Port)
+			resp.Error = "No UDP"
+
+			pkt, err := json.Marshal(resp)
+			if err != nil {
+				log.Print(err)
+				return
+			}
+			conn.Write(pkt)
+			return
+		}
+		for {
+			message := <-ip_channel
+			if !message.OK {
+				fmt.Printf("Host session exiting")
+				return
+			}
+			state.RefreshSession(ip_ent.Address.Addr, ip_ent.Address.Port)
+
+			fmt.Printf("Got host entry for %s(%d), sending response...\n", req.RemoteIP, req.RemotePeerPort)
+			resp.DestIP = message.IP.Addr
+			resp.DestPort = message.IP.Port
+			resp.Error = ""
+			pkt, err := json.Marshal(resp)
+			if err != nil {
+				log.Print(err)
+				return
+			}
+			conn.Write(pkt)
+		}
+	default:
+		fmt.Printf("Unknown connection type: %s\n", req.ConnectionType)
+		resp.Error = "Unknown connection type"
+
+		pkt, err := json.Marshal(resp)
+		if err != nil {
+			log.Print(err)
+			return
+		}
+		conn.Write(pkt)
+		return
+	}
+
+	if ok { //we don't need to wait, connection already established
 		fmt.Printf("Entry already exists for %s(%d), responding immediately!\n", req.RemoteIP, req.RemotePeerPort)
 		resp.DestIP = entry.Addr
 		resp.DestPort = entry.Port
