@@ -11,12 +11,17 @@ import (
 
 var entry_timeout = 90 * time.Second
 
+/*********** Containment Breach API Definitions ****************/
+
 type UDPPacket struct {
 	PeerPort int
 }
 
 type Request struct {
-	IP string
+	RemoteIP       string
+	RemotePeerPort int
+
+	LocalPeerPort int //used as identifier for TCP sender to associate with UDP packet
 }
 
 type Response struct {
@@ -27,15 +32,19 @@ type Response struct {
 	Error      string
 }
 
-type IPTuple struct {
-	Addr     string
-	Port     int
-	PeerPort int
-}
+/********************** Channel Message Definitions ****************/
 
 type IPTupleMessage struct { //sent over channel to TCP waiter, can represent failure/timeout
 	IP IPTuple
 	OK bool
+}
+
+/********************** Internal State Structures *******************/
+
+type IPTuple struct {
+	Addr     string
+	Port     int
+	PeerPort int
 }
 
 /*
@@ -61,8 +70,11 @@ func (state ServerState) AddIPEntry(addr string, port int, peer_port int) {
 	state.Lock.Lock()
 	defer state.Lock.Unlock()
 
+	//construct PeerMap index from addr and peer_port
+	index := fmt.Sprintf("%s:%d", addr, peer_port)
+
 	//check if entry already exists, and notifies waiting TCP thread if it exists
-	if entry, ok := state.PeerMap[addr]; ok {
+	if entry, ok := state.PeerMap[index]; ok {
 		for _, channel := range entry.WaitingChannels {
 			channel <- IPTupleMessage{IPTuple{addr, port, peer_port}, true}
 		}
@@ -75,7 +87,7 @@ func (state ServerState) AddIPEntry(addr string, port int, peer_port int) {
 	}
 
 	//if the TCP channel isn't here yet, just populate the IPTuple values for it when it arrives
-	state.PeerMap[addr] = &IPEntry{
+	state.PeerMap[index] = &IPEntry{
 		Address: IPTuple{addr, port, peer_port},
 		IPValid: true,
 		Created: time.Now(),
@@ -84,12 +96,14 @@ func (state ServerState) AddIPEntry(addr string, port int, peer_port int) {
 
 //checks if an entry for the given address exists, and returns the corresponding IPTuple
 //if it doesn't, it sets up a waiter channel and returns it, along with false for "ok"
-func (state ServerState) GetIPEntry(addr string, waiter_channel chan IPTupleMessage) (IPTuple, bool) {
+func (state ServerState) GetIPEntry(addr string, peer_port int, waiter_channel chan IPTupleMessage) (IPTuple, bool) {
 	state.Lock.Lock()
 	defer state.Lock.Unlock()
 
+	index := fmt.Sprintf("%s:%d", addr, peer_port)
+
 	//check if entry exists and use it if it does
-	if entry, ok := state.PeerMap[addr]; ok {
+	if entry, ok := state.PeerMap[index]; ok {
 		if entry.IPValid {
 			return entry.Address, true
 		}
@@ -98,7 +112,7 @@ func (state ServerState) GetIPEntry(addr string, waiter_channel chan IPTupleMess
 		return IPTuple{}, false
 	}
 
-	state.PeerMap[addr] = &IPEntry{
+	state.PeerMap[index] = &IPEntry{
 		WaitingChannels: []chan IPTupleMessage{waiter_channel},
 		Created:         time.Now(),
 	}
@@ -106,11 +120,13 @@ func (state ServerState) GetIPEntry(addr string, waiter_channel chan IPTupleMess
 }
 
 //get entry from ip map, but without failure/channel mechanism
-func (state ServerState) GetEntry(addr string) (*IPEntry, bool) {
+func (state ServerState) GetEntry(addr string, peer_port int) (*IPEntry, bool) {
 	state.Lock.RLock()
 	defer state.Lock.RUnlock()
 
-	value, ok := state.PeerMap[addr]
+	index := fmt.Sprintf("%s:%d", addr, peer_port)
+
+	value, ok := state.PeerMap[index]
 	return value, ok
 }
 
@@ -188,15 +204,15 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 		log.Print(err)
 		return
 	}
-	fmt.Printf("Got valid TCP request for %s from %s\n",
-		req.IP, conn.RemoteAddr().String())
+	fmt.Printf("Got valid TCP request for %s(%d) from %s\n",
+		req.RemoteIP, req.RemotePeerPort, conn.RemoteAddr().String())
 
 	var resp Response
 
 	//populate source entries from the UDP entry (if it's not there, that's on the client)
 	sender_addr := conn.RemoteAddr().(*net.TCPAddr).IP.String()
 	fmt.Printf("Looking up '%s'\n", sender_addr)
-	ip_ent, ok := state.GetEntry(sender_addr)
+	ip_ent, ok := state.GetEntry(sender_addr, req.LocalPeerPort)
 	if !ok {
 		fmt.Printf("TCP request was for a UDP entry that doesn't exist! Sending error...\n")
 		resp.Error = "No UDP received"
@@ -214,8 +230,8 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 
 	//add pending request for destination data to registry and wait if neccessary
 	ip_channel := make(chan IPTupleMessage)
-	if entry, ok := state.GetIPEntry(req.IP, ip_channel); ok { //we don't need to wait, connection already established
-		fmt.Printf("Entry already exists for %s, responding immediately!\n", req.IP)
+	if entry, ok := state.GetIPEntry(req.RemoteIP, req.RemotePeerPort, ip_channel); ok { //we don't need to wait, connection already established
+		fmt.Printf("Entry already exists for %s(%d), responding immediately!\n", req.RemoteIP, req.RemotePeerPort)
 		resp.DestIP = entry.Addr
 		resp.DestPort = entry.Port
 		resp.Error = ""
@@ -229,12 +245,12 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 		return
 	}
 
-	fmt.Printf("No entry for %s, waiting...\n", req.IP)
+	fmt.Printf("No entry for %s(%d), waiting...\n", req.RemoteIP, req.RemotePeerPort)
 
 	//UDP connection hasn't come in yet, wait for it with channel
 	message := <-ip_channel
 	if !message.OK { //entry timed out, big sad
-		fmt.Printf("Entry %s timed out! Telling the client the bad news...\n", req.IP)
+		fmt.Printf("Entry %s(%d) timed out! Telling the client the bad news...\n", req.RemoteIP, req.RemotePeerPort)
 		resp.Error = "Timeout"
 
 		pkt, err := json.Marshal(resp)
@@ -246,7 +262,7 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 		return
 	}
 
-	fmt.Printf("Finished waiting for entry %s, sending response...\n", req.IP)
+	fmt.Printf("Finished waiting for entry %s(%d), sending response...\n", req.RemoteIP, req.RemotePeerPort)
 	resp.DestIP = message.IP.Addr
 	resp.DestPort = message.IP.Port
 	resp.Error = ""
