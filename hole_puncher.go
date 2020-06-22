@@ -306,10 +306,11 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 			conn.Write(pkt)
 			return
 		}
+		fmt.Printf("Server setup for %s(%d) complete!\n", ip_ent.Address.Addr, req.LocalPeerPort)
 		for {
 			message := <-ip_channel
 			if !message.OK {
-				fmt.Printf("Host session exiting")
+				fmt.Printf("Host session exiting\n")
 				return
 			}
 			state.RefreshSession(ip_ent.Address.Addr, ip_ent.Address.Port)
