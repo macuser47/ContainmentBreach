@@ -25,7 +25,7 @@ Once the UDP packet has been sent, the peer is expected to initiate a TCP connec
 to wait for its peer/clients/server to connect. The peer sends a request containing identifying information,
 and the server will respond with peer information when it becomes available.
 
-There are some slight differences in the TCP connection depeiding on the connection type.
+There are some slight differences in the TCP connection depending on the connection type.
 In peer mode, the UDP+TCP transaction can happen in any order between the 2 peers. The peer that 
 completes its UDP+TCP handshake first will wait for the other peer before receiving a response.
 
