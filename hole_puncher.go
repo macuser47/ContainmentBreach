@@ -2,14 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
 	"sync"
 	"time"
 )
-
-var entry_timeout = 90 * time.Second
 
 /*********** Containment Breach API Definitions ****************/
 
@@ -62,9 +61,15 @@ type IPEntry struct {
 	Created time.Time
 }
 
+type Config struct {
+	EntryTimeout time.Duration
+	ServicePort  int
+}
+
 type ServerState struct {
 	Lock    sync.RWMutex
 	PeerMap map[string]*IPEntry
+	Config  Config
 }
 
 func (state ServerState) RefreshSession(addr string, peer_port int) {
@@ -179,7 +184,7 @@ func (state ServerState) Prune() { //remove stale entries
 	defer state.Lock.Unlock()
 
 	for key, value := range state.PeerMap {
-		if time.Since(value.Created) > entry_timeout {
+		if time.Since(value.Created) > state.Config.EntryTimeout {
 			fmt.Printf("Cleaning stale entry for %s\n", key)
 			for _, channel := range value.WaitingChannels {
 				channel <- IPTupleMessage{OK: false} //tell the waiting TCP threads the bad news
@@ -400,14 +405,19 @@ func listenTCP(state *ServerState, port int) {
 }
 
 func main() {
+	port := flag.Int("port", 6969, "Server UDP/TCP port")
+	timeout := flag.Int("lease_timeout", 90, "PeerPort lease timeout")
+
+	flag.Parse()
+
 	var state = ServerState{
 		PeerMap: make(map[string]*IPEntry),
+		Config:  Config{EntryTimeout: time.Duration(*timeout) * time.Second, ServicePort: *port},
 	}
-	port := 6969
-	fmt.Printf("Starting Containment Breach Hole-Punching server on port %d\n", port)
+	fmt.Printf("Starting Containment Breach Hole-Punching server on port %d\n", state.Config.ServicePort)
 
-	go listenUDP(&state, port)
-	go listenTCP(&state, port)
+	go listenUDP(&state, state.Config.ServicePort)
+	go listenTCP(&state, state.Config.ServicePort)
 
 	//periodically prune the ip_map
 	for {
