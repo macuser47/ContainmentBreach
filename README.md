@@ -1,13 +1,13 @@
 # Containment Breach Hole Punching Server
 
-_Containment breach_ is a service designed for setting up UDP p2p sessions via 
+Containment Breach is a service designed for setting up UDP p2p sessions via 
 [hole punching](https://en.wikipedia.org/wiki/UDP_hole_punching). The basic idea is that
 2 peers that want to connect to each other connect to _Containment breach_, which informs
 each peer of the UDP port of the other peer, which they can use to set up a connection.
 
-_Containment breach_ works on both Windows and Linux.
+Containment Breach works on both Windows and Linux.
 
-_Containment breach_ supports 2 different type of connection setup:
+Containment Breach supports 2 different type of connection setup:
 
 * Peer mode, which allows 2 peers that know each other's IP addresses to connect
 * Client/Server mode, which allows a Server to register itself with _Containment breach_
@@ -29,9 +29,9 @@ There are some slight differences in the TCP connection depeiding on the connect
 In peer mode, the UDP+TCP transaction can happen in any order between the 2 peers. The peer that 
 completes its UDP+TCP handshake first will wait for the other peer before receiving a response.
 
-In Server/Client mode, the server opens a _persistent_ TCP connection with the server and receives
-packets every time a client connects. If a client tries to connect to a host that doesn't exist, 
-it will receive an error instead of waiting.
+In Server/Client mode, the peer server opens a persistent TCP connection with the containment breach
+server and receives packets every time a client connects. If a client tries to connect to a host 
+that doesn't exist, it will receive an error instead of waiting.
 
 Connection leases time out after 90 seconds by default. Any peers waiting for a connection receive
 a timeout error once a lease has expired.
@@ -56,7 +56,7 @@ Usage of containment_breach:
 
 
 ## API Definition
-_Containment breach_ uses a JSON api to communicate with peers.
+Containment Breach uses a JSON api to communicate with peers.
 
 UDP requests are formatted as follows:
 ```json
