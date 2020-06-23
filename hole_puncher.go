@@ -236,6 +236,27 @@ func listenUDP(state *ServerState, port int) {
 	}
 }
 
+func readTCPRequests(conn net.Conn, channel chan Request) {
+	var req Request
+	decoder := json.NewDecoder(conn)
+
+	for {
+		if err := decoder.Decode(&req); err != nil {
+			return
+		}
+		channel <- req
+	}
+}
+
+func sendTCPResponse(conn net.Conn, response Response) error {
+	pkt, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	conn.Write(pkt)
+	return nil
+}
+
 func handleTCPConnection(conn net.Conn, state *ServerState) {
 	defer conn.Close()
 
@@ -259,18 +280,14 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 
 	//populate source entries from the UDP entry (if it's not there, that's on the client)
 	sender_addr := conn.RemoteAddr().(*net.TCPAddr).IP.String()
-	fmt.Printf("Looking up '%s'\n", sender_addr)
 	ip_ent, ok := state.GetEntry(sender_addr, req.LocalPeerPort)
 	if !ok {
 		fmt.Printf("TCP request was for a UDP entry that doesn't exist! Sending error...\n")
 		resp.Error = "No UDP received"
 
-		pkt, err := json.Marshal(resp)
-		if err != nil {
+		if err := sendTCPResponse(conn, resp); err != nil {
 			log.Print(err)
-			return
 		}
-		conn.Write(pkt)
 		return
 	}
 	resp.SourceIP = ip_ent.Address.Addr
@@ -289,12 +306,9 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 				ip_ent.Address.Addr, ip_ent.Address.Port)
 			resp.Error = "No Host"
 
-			pkt, err := json.Marshal(resp)
-			if err != nil {
+			if err := sendTCPResponse(conn, resp); err != nil {
 				log.Print(err)
-				return
 			}
-			conn.Write(pkt)
 			return
 		}
 	case "Server":
@@ -303,44 +317,57 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 				ip_ent.Address.Addr, ip_ent.Address.Port)
 			resp.Error = "No UDP"
 
-			pkt, err := json.Marshal(resp)
-			if err != nil {
+			if err := sendTCPResponse(conn, resp); err != nil {
 				log.Print(err)
-				return
 			}
-			conn.Write(pkt)
 			return
 		}
-		fmt.Printf("Server setup for %s(%d) complete!\n", ip_ent.Address.Addr, req.LocalPeerPort)
-		for {
-			message := <-ip_channel
-			if !message.OK {
-				fmt.Printf("Host session exiting\n")
-				return
-			}
-			state.RefreshSession(ip_ent.Address.Addr, ip_ent.Address.Port)
 
-			fmt.Printf("Got host entry for %s(%d), sending response...\n", req.RemoteIP, req.RemotePeerPort)
-			resp.DestIP = message.IP.Addr
-			resp.DestPort = message.IP.Port
-			resp.Error = ""
-			pkt, err := json.Marshal(resp)
-			if err != nil {
-				log.Print(err)
-				return
+		//register listener for more TCP events over conn
+		request_channel := make(chan Request)
+		go readTCPRequests(conn, request_channel)
+
+		fmt.Printf("Server setup for %s(%d) complete!\n", ip_ent.Address.Addr, req.LocalPeerPort)
+
+		//wait on new connection or keepalive
+		for {
+			select {
+			case keepalive_req := <-request_channel:
+				if keepalive_req.ConnectionType != "KeepAlive" {
+					fmt.Printf("Host %s(%d) sent request that isn't KeepAlive: %s. Terminating session...\n",
+						ip_ent.Address.Addr, req.LocalPeerPort, keepalive_req.ConnectionType)
+					resp.Error = "ConnectionType must be KeepAlive"
+					if err := sendTCPResponse(conn, resp); err != nil {
+						log.Print(err)
+					}
+					return
+				}
+				state.RefreshSession(ip_ent.Address.Addr, req.LocalPeerPort)
+			case message := <-ip_channel:
+				if !message.OK {
+					fmt.Printf("Host session exiting\n")
+					return
+				}
+				state.RefreshSession(ip_ent.Address.Addr, req.LocalPeerPort)
+
+				fmt.Printf("Got host entry for %s(%d), sending response...\n", req.RemoteIP, req.RemotePeerPort)
+				resp.DestIP = message.IP.Addr
+				resp.DestPort = message.IP.Port
+				resp.Error = ""
+
+				if err := sendTCPResponse(conn, resp); err != nil {
+					log.Print(err)
+					return
+				}
 			}
-			conn.Write(pkt)
 		}
 	default:
 		fmt.Printf("Unknown connection type: %s\n", req.ConnectionType)
 		resp.Error = "Unknown connection type"
 
-		pkt, err := json.Marshal(resp)
-		if err != nil {
+		if err := sendTCPResponse(conn, resp); err != nil {
 			log.Print(err)
-			return
 		}
-		conn.Write(pkt)
 		return
 	}
 
@@ -350,12 +377,9 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 		resp.DestPort = entry.Port
 		resp.Error = ""
 
-		pkt, err := json.Marshal(resp)
-		if err != nil {
+		if err := sendTCPResponse(conn, resp); err != nil {
 			log.Print(err)
-			return
 		}
-		conn.Write(pkt)
 		return
 	}
 
@@ -367,12 +391,9 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 		fmt.Printf("Entry %s(%d) timed out! Telling the client the bad news...\n", req.RemoteIP, req.RemotePeerPort)
 		resp.Error = "Timeout"
 
-		pkt, err := json.Marshal(resp)
-		if err != nil {
+		if err := sendTCPResponse(conn, resp); err != nil {
 			log.Print(err)
-			return
 		}
-		conn.Write(pkt)
 		return
 	}
 
@@ -380,12 +401,10 @@ func handleTCPConnection(conn net.Conn, state *ServerState) {
 	resp.DestIP = message.IP.Addr
 	resp.DestPort = message.IP.Port
 	resp.Error = ""
-	pkt, err := json.Marshal(resp)
-	if err != nil {
+
+	if err := sendTCPResponse(conn, resp); err != nil {
 		log.Print(err)
-		return
 	}
-	conn.Write(pkt)
 }
 
 func listenTCP(state *ServerState, port int) {
