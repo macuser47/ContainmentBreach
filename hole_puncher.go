@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -417,7 +418,7 @@ func listenTCP(state *ServerState, port int) {
 		conn, err := sock.Accept()
 		if err != nil {
 			log.Print(err)
-			continue
+			os.Exit(1)
 		}
 		go handleTCPConnection(conn, state)
 	}
